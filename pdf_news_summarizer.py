@@ -70,7 +70,23 @@ def list_files_via_api(api_key: str) -> list[dict]:
     files = []
     page_token = None
 
-    print("使用 Google Drive API 列出所有檔案...")
+    import threading
+
+    print("使用 Google Drive API 列出所有檔案...", end="", flush=True)
+
+    stop_spinner = threading.Event()
+
+    def spinner():
+        chars = [".", "..", "...", "   "]
+        i = 0
+        while not stop_spinner.is_set():
+            print(f"\r使用 Google Drive API 列出所有檔案{chars[i % 4]}", end="", flush=True)
+            i += 1
+            stop_spinner.wait(0.5)
+
+    t = threading.Thread(target=spinner, daemon=True)
+    t.start()
+
     while True:
         params = {
             "q": f"'{FOLDER_ID}' in parents and trashed=false",
@@ -83,12 +99,21 @@ def list_files_via_api(api_key: str) -> list[dict]:
         result = service.files().list(**params).execute()
         batch = result.get("files", [])
         files.extend(batch)
-        print(f"  已讀取 {len(files)} 個檔案...")
 
         page_token = result.get("nextPageToken")
         if not page_token:
             break
 
+    stop_spinner.set()
+    t.join()
+    print(f"\r使用 Google Drive API 列出所有檔案... 完成          ")
+
+    print(f"資料夾共 {len(files)} 個項目")
+    non_pdfs = [f for f in files if not f["name"].lower().endswith(".pdf")]
+    if non_pdfs:
+        print(f"  非 PDF 檔案 ({len(non_pdfs)} 個)：")
+        for f in non_pdfs:
+            print(f"    {f['name']} [{f['mimeType']}]")
     pdfs = [f for f in files if f["name"].lower().endswith(".pdf")]
     print(f"共找到 {len(pdfs)} 個 PDF 檔案\n")
     return pdfs
@@ -156,9 +181,43 @@ def download_all_pdfs() -> list[Path]:
     return download_via_gdown_fallback()
 
 
+MAX_PDF_BYTES = 20 * 1024 * 1024  # 20MB 上限
+
+
+def trim_pdf(raw: bytes) -> bytes:
+    """若 PDF 超過大小限制，逐步減少頁數直到符合限制"""
+    from pypdf import PdfReader, PdfWriter
+    import io
+
+    if len(raw) <= MAX_PDF_BYTES:
+        return raw
+
+    reader = PdfReader(io.BytesIO(raw))
+    total = len(reader.pages)
+    # 從全部頁數開始，每次減少 2 頁
+    for n in range(total, 0, -2):
+        writer = PdfWriter()
+        for i in range(n):
+            writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        trimmed = buf.getvalue()
+        if len(trimmed) <= MAX_PDF_BYTES:
+            print(f"  (PDF 過大，取前 {n}/{total} 頁)")
+            return trimmed
+
+    # 保底：只取第 1 頁
+    writer = PdfWriter()
+    writer.add_page(reader.pages[0])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
 def summarize_pdf(client: anthropic.Anthropic, pdf_path: Path) -> str:
     with open(pdf_path, "rb") as f:
         data = f.read()
+    data = trim_pdf(data)
     pdf_data = base64.standard_b64encode(data).decode("utf-8")
     print(f"  上傳中... ({len(data)/1024/1024:.1f} MB)")
 
