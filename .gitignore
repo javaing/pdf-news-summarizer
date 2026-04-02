@@ -1,0 +1,6 @@
+.env
+gdrive_pdfs/
+summaries/
+progress.json
+__pycache__/
+*.pyc
